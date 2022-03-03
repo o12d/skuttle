@@ -1,40 +1,96 @@
 package main
 
 import (
-	"fmt"
+	"bytes"
+	"encoding/base32"
+	"io/ioutil"
+	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/256dpi/newdns"
+	"github.com/google/uuid"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/miekg/dns"
+	"golang.org/x/net/html/charset"
 )
 
-func report(writeAPI api.WriteAPI) {
+var client influxdb2.Client = influxdb2.NewClient("https://westeurope-1.azure.cloud2.influxdata.com", os.Getenv("INFLUX_TOKEN"))
+var writeAPI api.WriteAPI = client.WriteAPI("michael_riedmann@live.com", "skuttle")
+
+func report(appId uuid.UUID, requestId uuid.UUID, version string, arch string) {
 	defer writeAPI.Flush()
 
 	p := influxdb2.NewPointWithMeasurement("stat").
-		AddTag("unit", "temperature").
-		AddField("avg", 23.2).
-		AddField("max", 45).
+		AddField("requestId", requestId.String()).
+		AddTag("appId", appId.String()).
+		AddTag("version", version).
+		AddTag("arch", arch).
 		SetTime(time.Now())
 
 	writeAPI.WritePoint(p)
 }
 
+func convertToUTF8(strBytes []byte, origEncoding string) string {
+	byteReader := bytes.NewReader(strBytes)
+	reader, _ := charset.NewReaderLabel(origEncoding, byteReader)
+	strBytes, _ = ioutil.ReadAll(reader)
+	return string(strBytes)
+}
+
+func addPadding(s string) string {
+	d := strings.ToUpper(s)
+	padding := ""
+	switch len(d) % 8 {
+	case 2:
+		padding = "======"
+	case 4:
+		padding = "===="
+	case 5:
+		padding = "==="
+	case 7:
+		padding = "=="
+	}
+	return d + padding
+}
+
+func decodeData(s string) ([]byte, error) {
+	d := addPadding(s)
+
+	e, err := base32.StdEncoding.DecodeString(d)
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func convertSliceToUUID(slice []byte) uuid.UUID {
+	var bId [16]byte
+
+	copy(bId[:], slice[:16])
+	return uuid.UUID(bId)
+}
+
+func processData(d []byte) (string, uuid.UUID, error) {
+	id := convertSliceToUUID(d[:16])
+	bPayload := d[16:]
+	payload := convertToUTF8(bPayload, "utf8")
+
+	return payload, id, nil
+}
+
 func main() {
 	// Create a client
 	// You can generate an API Token from the "API Tokens Tab" in the UI
-	client := influxdb2.NewClient("https://westeurope-1.azure.cloud2.influxdata.com", os.Getenv("INFLUX_TOKEN"))
-	writeAPI := client.WriteAPI("michael_riedmann@live.com", "skuttle")
 
 	// Get errors channel
 	errorsCh := writeAPI.Errors()
 	// Create go proc for reading and logging errors
 	go func() {
 		for err := range errorsCh {
-			fmt.Printf("write error: %s\n", err.Error())
+			log.Printf("write error: %s\n", err.Error())
 		}
 	}()
 
@@ -49,7 +105,24 @@ func main() {
 			"zoe.ns.cloudflare.com.",
 		},
 		Handler: func(name string) ([]newdns.Set, error) {
-			// return apex records
+			defer func() {
+				if err := recover(); err != nil {
+					log.Println("panic occurred:", err)
+				}
+			}()
+
+			s := strings.Split(name, ".")
+			apiId := s[2]
+			decAppId, _ := decodeData(s[1])
+			appId := uuid.UUID(convertSliceToUUID(decAppId))
+			decPayload, _ := decodeData(s[0])
+			tags, id, err := processData(decPayload)
+			if err != nil {
+				panic(err)
+			}
+			sTags := strings.Split(tags, ";")
+			log.Printf("%v %v %v %v %v\n", apiId, appId, tags, id, err)
+			report(appId, id, sTags[0], sTags[1])
 
 			var data = []string{name}
 			return []newdns.Set{
@@ -77,21 +150,20 @@ func main() {
 			return nil, nil
 		},
 		Logger: func(e newdns.Event, msg *dns.Msg, err error, reason string) {
-			fmt.Println(e, err, reason)
+			// log.Printf("%-8s %v %s\n", e, err, reason)
 		},
 	})
 
 	// run server
 	go func() {
-		err := server.Run(":1337")
+		err := server.Run(":15353")
 		if err != nil {
 			panic(err)
 		}
 	}()
 
 	// print info
-	fmt.Println("Query apex: dig example.com @0.0.0.0 -p 1337")
-	fmt.Println("Query other: dig foo.example.com @0.0.0.0 -p 1337")
+	log.Println("running on port 15353")
 
 	// wait forever
 	select {}

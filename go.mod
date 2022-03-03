@@ -5,6 +5,7 @@ go 1.16
 require (
 	github.com/256dpi/newdns v0.2.3
 	github.com/deepmap/oapi-codegen v1.9.1 // indirect
+	github.com/google/uuid v1.3.0 // indirect
 	github.com/influxdata/influxdb-client-go/v2 v2.7.0
 	github.com/influxdata/line-protocol v0.0.0-20210922203350-b1ad95c89adf // indirect
 	github.com/miekg/dns v1.1.46
